@@ -296,50 +296,57 @@ class Recorder(threading.Thread):
             self.engine.pool.shutdown()
 
     @callback
-    def async_initialize(self) -> None:
-        """Initialize the recorder."""
-        entity_filter = self.entity_filter
-        exclude_event_types = self.exclude_event_types
-        queue_put = self._queue.put_nowait
-        event_task = EventTask
+    def filter_entity_ids(entity_id, entity_filter, queue_put, event_task, event):
+    """Filter entity ids and add event to queue if they pass the filter."""
+    if isinstance(entity_id, str):
+        if entity_filter(entity_id):
+            queue_put(event_task(event))
+        return
 
-        @callback
-        def _event_listener(event: Event) -> None:
-            """Listen for new events and put them in the process queue."""
-            if event.event_type in exclude_event_types:
-                return
-
-            if (entity_id := event.data.get(ATTR_ENTITY_ID)) is None:
+    if isinstance(entity_id, list):
+        for eid in entity_id:
+            if entity_filter(eid):
                 queue_put(event_task(event))
                 return
 
-            if isinstance(entity_id, str):
-                if entity_filter(entity_id):
-                    queue_put(event_task(event))
-                return
+    # If the entity_id is neither str nor list, or unknown, add event to the queue.
+    queue_put(event_task(event))
 
-            if isinstance(entity_id, list):
-                for eid in entity_id:
-                    if entity_filter(eid):
-                        queue_put(event_task(event))
-                        return
-                return
 
-            # Unknown what it is.
+async def async_initialize(self) -> None:
+    """Initialize the recorder."""
+    entity_filter = self.entity_filter
+    exclude_event_types = self.exclude_event_types
+    queue_put = self._queue.put_nowait
+    event_task = EventTask
+
+    @callback
+    def _event_listener(event: Event) -> None:
+        """Listen for new events and put them in the process queue."""
+        # If event type is in excluded, return immediately.
+        if event.event_type in exclude_event_types:
+            return
+
+        entity_id = event.data.get(ATTR_ENTITY_ID)
+        # If entity_id is None, add event to the queue and return.
+        if entity_id is None:
             queue_put(event_task(event))
+            return
 
-        self._event_listener = self.hass.bus.async_listen(
-            MATCH_ALL,
-            _event_listener,
-            run_immediately=True,
-        )
-        self._queue_watcher = async_track_time_interval(
-            self.hass,
-            self._async_check_queue,
-            timedelta(minutes=10),
-            name="Recorder queue watcher",
-        )
+        # Filter entity ids and add event to queue if it passes the filter.
+        filter_entity_ids(entity_id, entity_filter, queue_put, event_task, event)
 
+    self._event_listener = self.hass.bus.async_listen(
+        MATCH_ALL,
+        _event_listener,
+        run_immediately=True,
+    )
+    self._queue_watcher = async_track_time_interval(
+        self.hass,
+        self._async_check_queue,
+        timedelta(minutes=10),
+        name="Recorder queue watcher",
+    )
     @callback
     def _async_keep_alive(self, now: datetime) -> None:
         """Queue a keep alive."""
