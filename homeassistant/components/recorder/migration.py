@@ -1270,72 +1270,68 @@ def _migrate_columns_to_timestamp(
 
 
 @database_job_retry_wrapper("Migrate statistics columns to timestamp", 3)
+def migrate_sqlite(table, session):
+    session.connection().execute(
+        text(
+            f"UPDATE {table} set start_ts=strftime('%s',start) + "  # noqa: S608
+            "cast(substr(start,-7) AS FLOAT), "
+            f"created_ts=strftime('%s',created) + "
+            "cast(substr(created,-7) AS FLOAT), "
+            f"last_reset_ts=strftime('%s',last_reset) + "
+            "cast(substr(last_reset,-7) AS FLOAT);"
+        )
+    )
+
+def migrate_mysql(table, session):
+    result = session.connection().execute(
+        text(
+            f"UPDATE {table} set start_ts="  # noqa: S608
+            "IF(start is NULL or UNIX_TIMESTAMP(start) is NULL,0,"
+            "UNIX_TIMESTAMP(start) "
+            "), "
+            "created_ts="
+            "UNIX_TIMESTAMP(created), "
+            "last_reset_ts="
+            "UNIX_TIMESTAMP(last_reset) "
+            "where start_ts is NULL "
+            "LIMIT 100000;"
+        )
+    )
+    return result
+
+def migrate_postgresql(table, session):
+    result = session.connection().execute(
+        text(
+            f"UPDATE {table} set start_ts="  # noqa: S608
+            "(case when start is NULL then 0 else EXTRACT(EPOCH FROM start::timestamptz) end), "
+            "created_ts=EXTRACT(EPOCH FROM created::timestamptz), "
+            "last_reset_ts=EXTRACT(EPOCH FROM last_reset::timestamptz) "
+            "where id IN ("
+            f"SELECT id FROM {table} where start_ts is NULL LIMIT 100000"
+            ");"
+        )
+    )
+    return result
+
+MIGRATION_STRATEGY = {
+    SupportedDialect.SQLITE: migrate_sqlite,
+    SupportedDialect.MYSQL: migrate_mysql,
+    SupportedDialect.POSTGRESQL: migrate_postgresql,
+}
+
 def _migrate_statistics_columns_to_timestamp(
     instance: Recorder, session_maker: Callable[[], Session], engine: Engine
 ) -> None:
     """Migrate statistics columns to use timestamp."""
-    # Migrate all data in statistics.start to statistics.start_ts
-    # Migrate all data in statistics.created to statistics.created_ts
-    # Migrate all data in statistics.last_reset to statistics.last_reset_ts
-    # Migrate all data in statistics_short_term.start to statistics_short_term.start_ts
-    # Migrate all data in statistics_short_term.created to statistics_short_term.created_ts
-    # Migrate all data in statistics_short_term.last_reset to statistics_short_term.last_reset_ts
-    result: CursorResult | None = None
-    if engine.dialect.name == SupportedDialect.SQLITE:
-        # With SQLite we do this in one go since it is faster
-        for table in STATISTICS_TABLES:
+    migrate_func = MIGRATION_STRATEGY.get(engine.dialect.name)
+    if not migrate_func:
+        raise ValueError("Unsupported database dialect")
+
+    for table in STATISTICS_TABLES:
+        result = None
+        while result is None or result.rowcount > 0:  # type: ignore[unreachable]
             with session_scope(session=session_maker()) as session:
-                session.connection().execute(
-                    text(
-                        f"UPDATE {table} set start_ts=strftime('%s',start) + "  # noqa: S608
-                        "cast(substr(start,-7) AS FLOAT), "
-                        f"created_ts=strftime('%s',created) + "
-                        "cast(substr(created,-7) AS FLOAT), "
-                        f"last_reset_ts=strftime('%s',last_reset) + "
-                        "cast(substr(last_reset,-7) AS FLOAT);"
-                    )
-                )
-    elif engine.dialect.name == SupportedDialect.MYSQL:
-        # With MySQL we do this in chunks to avoid hitting the `innodb_buffer_pool_size` limit
-        # We also need to do this in a loop since we can't be sure that we have
-        # updated all rows in the table until the rowcount is 0
-        for table in STATISTICS_TABLES:
-            result = None
-            while result is None or result.rowcount > 0:  # type: ignore[unreachable]
-                with session_scope(session=session_maker()) as session:
-                    result = session.connection().execute(
-                        text(
-                            f"UPDATE {table} set start_ts="  # noqa: S608
-                            "IF(start is NULL or UNIX_TIMESTAMP(start) is NULL,0,"
-                            "UNIX_TIMESTAMP(start) "
-                            "), "
-                            "created_ts="
-                            "UNIX_TIMESTAMP(created), "
-                            "last_reset_ts="
-                            "UNIX_TIMESTAMP(last_reset) "
-                            "where start_ts is NULL "
-                            "LIMIT 100000;"
-                        )
-                    )
-    elif engine.dialect.name == SupportedDialect.POSTGRESQL:
-        # With Postgresql we do this in chunks to avoid using too much memory
-        # We also need to do this in a loop since we can't be sure that we have
-        # updated all rows in the table until the rowcount is 0
-        for table in STATISTICS_TABLES:
-            result = None
-            while result is None or result.rowcount > 0:  # type: ignore[unreachable]
-                with session_scope(session=session_maker()) as session:
-                    result = session.connection().execute(
-                        text(
-                            f"UPDATE {table} set start_ts="  # noqa: S608
-                            "(case when start is NULL then 0 else EXTRACT(EPOCH FROM start::timestamptz) end), "
-                            "created_ts=EXTRACT(EPOCH FROM created::timestamptz), "
-                            "last_reset_ts=EXTRACT(EPOCH FROM last_reset::timestamptz) "
-                            "where id IN ("
-                            f"SELECT id FROM {table} where start_ts is NULL LIMIT 100000"
-                            ");"
-                        )
-                    )
+                result = migrate_func(table, session)
 
 
 def _context_id_to_bytes(context_id: str | None) -> bytes | None:
