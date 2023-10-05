@@ -802,6 +802,38 @@ def list_statistic_ids(
     return _flatten_list_statistic_ids_metadata_result(result)
 
 
+def _finalize_period(
+    prev_stat: StatisticsRow,
+    period_start_end: Callable[[float], tuple[float, float]],
+    mean_values: list[float],
+    min_values: list[float],
+    max_values: list[float],
+    _want_mean: bool,
+    _want_min: bool,
+    _want_max: bool,
+    _want_last_reset: bool,
+    _want_state: bool,
+    _want_sum: bool,
+) -> StatisticsRow:
+    start, end = period_start_end(prev_stat["start"])
+    row: StatisticsRow = {
+        "start": start,
+        "end": end,
+    }
+    if _want_mean:
+        row["mean"] = mean(mean_values) if mean_values else None
+    if _want_min:
+        row["min"] = min(min_values) if min_values else None
+    if _want_max:
+        row["max"] = max(max_values) if max_values else None
+    if _want_last_reset:
+        row["last_reset"] = prev_stat.get("last_reset")
+    if _want_state:
+        row["state"] = prev_stat.get("state")
+    if _want_sum:
+        row["sum"] = prev_stat["sum"]
+    return row
+
 def _reduce_statistics(
     stats: dict[str, list[StatisticsRow]],
     same_period: Callable[[float, float], bool],
@@ -812,12 +844,14 @@ def _reduce_statistics(
     """Reduce hourly statistics to daily or monthly statistics."""
     result: dict[str, list[StatisticsRow]] = defaultdict(list)
     period_seconds = period.total_seconds()
+    
     _want_mean = "mean" in types
     _want_min = "min" in types
     _want_max = "max" in types
     _want_last_reset = "last_reset" in types
     _want_state = "state" in types
     _want_sum = "sum" in types
+    
     for statistic_id, stat_list in stats.items():
         max_values: list[float] = []
         mean_values: list[float] = []
@@ -828,28 +862,24 @@ def _reduce_statistics(
         # Loop over the hourly statistics + a fake entry to end the period
         for statistic in chain(stat_list, (fake_entry,)):
             if not same_period(prev_stat["start"], statistic["start"]):
-                start, end = period_start_end(prev_stat["start"])
-                # The previous statistic was the last entry of the period
-                row: StatisticsRow = {
-                    "start": start,
-                    "end": end,
-                }
-                if _want_mean:
-                    row["mean"] = mean(mean_values) if mean_values else None
-                    mean_values.clear()
-                if _want_min:
-                    row["min"] = min(min_values) if min_values else None
-                    min_values.clear()
-                if _want_max:
-                    row["max"] = max(max_values) if max_values else None
-                    max_values.clear()
-                if _want_last_reset:
-                    row["last_reset"] = prev_stat.get("last_reset")
-                if _want_state:
-                    row["state"] = prev_stat.get("state")
-                if _want_sum:
-                    row["sum"] = prev_stat["sum"]
+                row = _finalize_period(
+                    prev_stat,
+                    period_start_end,
+                    mean_values,
+                    min_values,
+                    max_values,
+                    _want_mean,
+                    _want_min,
+                    _want_max,
+                    _want_last_reset,
+                    _want_state,
+                    _want_sum,
+                )
                 result[statistic_id].append(row)
+                mean_values.clear()
+                min_values.clear()
+                max_values.clear()
+                
             if _want_max and (_max := statistic.get("max")) is not None:
                 max_values.append(_max)
             if _want_mean and (_mean := statistic.get("mean")) is not None:
@@ -858,7 +888,7 @@ def _reduce_statistics(
                 min_values.append(_min)
             prev_stat = statistic
 
-    return result
+    return result
 
 
 def reduce_day_ts_factory() -> (
