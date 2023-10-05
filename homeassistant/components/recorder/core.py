@@ -781,77 +781,82 @@ async def async_initialize(self) -> None:
         self._run_event_loop()
 
     def _activate_and_set_db_ready(self) -> None:
-        """Activate the table managers or schedule migrations and mark the db as ready."""
-        with session_scope(session=self.get_session(), read_only=True) as session:
-            # Prime the statistics meta manager as soon as possible
-            # since we want the frontend queries to avoid a thundering
-            # herd of queries to find the statistics meta data if
-            # there are a lot of statistics graphs on the frontend.
-            if self.schema_version >= STATISTICS_ROWS_SCHEMA_VERSION:
-                self.statistics_meta_manager.load(session)
+    """Activate the table managers or schedule migrations and mark the db as ready."""
+    with session_scope(session=self.get_session(), read_only=True) as session:
+        self._handle_possible_migrations(session)
+        
+        self._handle_state_meta_activation(session)
+        
+        self._handle_legacy_states_event_id_index(session)
+        
+    # We must only set the db ready after we have set the table managers
+    # to active if there is no data to migrate.
+    #
+    # This ensures that the history queries will use the new tables
+    # and not the old ones as soon as the API is available.
+    self.hass.add_job(self.async_set_db_ready)
 
-            if (
-                self.schema_version < CONTEXT_ID_AS_BINARY_SCHEMA_VERSION
-                or execute_stmt_lambda_element(
-                    session, has_states_context_ids_to_migrate()
-                )
+
+def _handle_possible_migrations(self, session):
+    if (
+        self.schema_version < CONTEXT_ID_AS_BINARY_SCHEMA_VERSION
+        or execute_stmt_lambda_element(
+            session, has_states_context_ids_to_migrate()
+        )
+    ):
+        self.queue_task(StatesContextIDMigrationTask())
+
+    if (
+        self.schema_version < CONTEXT_ID_AS_BINARY_SCHEMA_VERSION
+        or execute_stmt_lambda_element(
+            session, has_events_context_ids_to_migrate()
+        )
+    ):
+        self.queue_task(EventsContextIDMigrationTask())
+
+    if (
+        self.schema_version < EVENT_TYPE_IDS_SCHEMA_VERSION
+        or execute_stmt_lambda_element(session, has_event_type_to_migrate())
+    ):
+        self.queue_task(EventTypeIDMigrationTask())
+    else:
+        _LOGGER.debug("Activating event_types manager as all data is migrated")
+        self.event_type_manager.active = True
+
+
+def _handle_state_meta_activation(self, session):
+    if (
+        self.schema_version < STATES_META_SCHEMA_VERSION
+        or execute_stmt_lambda_element(session, has_entity_ids_to_migrate())
+    ):
+        self.queue_task(EntityIDMigrationTask())
+    else:
+        _LOGGER.debug("Activating states_meta manager as all data is migrated")
+        self.states_meta_manager.active = True
+        with contextlib.suppress(SQLAlchemyError):
+            # If ix_states_entity_id_last_updated_ts still exists
+            # on the states table it means the entity id migration
+            # finished by the EntityIDPostMigrationTask did not
+            # because they restarted in the middle of it. We need
+            # to pick back up where we left off.
+            if get_index_by_name(
+                session,
+                TABLE_STATES,
+                LEGACY_STATES_ENTITY_ID_LAST_UPDATED_INDEX,
             ):
-                self.queue_task(StatesContextIDMigrationTask())
+                self.queue_task(EntityIDPostMigrationTask())
+                
 
-            if (
-                self.schema_version < CONTEXT_ID_AS_BINARY_SCHEMA_VERSION
-                or execute_stmt_lambda_element(
-                    session, has_events_context_ids_to_migrate()
-                )
+def _handle_legacy_states_event_id_index(self, session):
+    if self.schema_version > LEGACY_STATES_EVENT_ID_INDEX_SCHEMA_VERSION:
+        with contextlib.suppress(SQLAlchemyError):
+            # If the index of event_ids on the states table is still present
+            # we need to queue a task to remove it.
+            if get_index_by_name(
+                session, TABLE_STATES, LEGACY_STATES_EVENT_ID_INDEX
             ):
-                self.queue_task(EventsContextIDMigrationTask())
-
-            if (
-                self.schema_version < EVENT_TYPE_IDS_SCHEMA_VERSION
-                or execute_stmt_lambda_element(session, has_event_type_to_migrate())
-            ):
-                self.queue_task(EventTypeIDMigrationTask())
-            else:
-                _LOGGER.debug("Activating event_types manager as all data is migrated")
-                self.event_type_manager.active = True
-
-            if (
-                self.schema_version < STATES_META_SCHEMA_VERSION
-                or execute_stmt_lambda_element(session, has_entity_ids_to_migrate())
-            ):
-                self.queue_task(EntityIDMigrationTask())
-            else:
-                _LOGGER.debug("Activating states_meta manager as all data is migrated")
-                self.states_meta_manager.active = True
-                with contextlib.suppress(SQLAlchemyError):
-                    # If ix_states_entity_id_last_updated_ts still exists
-                    # on the states table it means the entity id migration
-                    # finished by the EntityIDPostMigrationTask did not
-                    # because they restarted in the middle of it. We need
-                    # to pick back up where we left off.
-                    if get_index_by_name(
-                        session,
-                        TABLE_STATES,
-                        LEGACY_STATES_ENTITY_ID_LAST_UPDATED_INDEX,
-                    ):
-                        self.queue_task(EntityIDPostMigrationTask())
-
-            if self.schema_version > LEGACY_STATES_EVENT_ID_INDEX_SCHEMA_VERSION:
-                with contextlib.suppress(SQLAlchemyError):
-                    # If the index of event_ids on the states table is still present
-                    # we need to queue a task to remove it.
-                    if get_index_by_name(
-                        session, TABLE_STATES, LEGACY_STATES_EVENT_ID_INDEX
-                    ):
-                        self.queue_task(EventIdMigrationTask())
-                        self.use_legacy_events_index = True
-
-        # We must only set the db ready after we have set the table managers
-        # to active if there is no data to migrate.
-        #
-        # This ensures that the history queries will use the new tables
-        # and not the old ones as soon as the API is available.
-        self.hass.add_job(self.async_set_db_ready)
+                self.queue_task(EventIdMigrationTask())
+                self.use_legacy_events_index = True
 
     def _run_event_loop(self) -> None:
         """Run the event loop for the recorder."""
