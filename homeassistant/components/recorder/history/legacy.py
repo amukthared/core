@@ -320,6 +320,27 @@ def _significant_states_stmt(
     
     return stmt
 
+def validate_parameters(entity_ids, filters):
+    """Validate the parameters provided to the function."""
+    if filters is not None:
+        raise NotImplementedError("Filters are no longer supported")
+    if not entity_ids:
+        raise ValueError("entity_ids must be provided")
+    
+def fetch_states(hass, session, start_time, end_time, entity_ids, 
+                 significant_changes_only, no_attributes):
+    """Fetch states from the database."""
+    stmt = _significant_states_stmt(
+        _schema_version(hass),
+        start_time,
+        end_time,
+        entity_ids,
+        significant_changes_only,
+        no_attributes,
+    )
+    states = execute_stmt_lambda_element(session, stmt, None, end_time)
+    return states
+
 def get_significant_states_with_session(
     hass: HomeAssistant,
     session: Session,
@@ -334,7 +355,7 @@ def get_significant_states_with_session(
     compressed_state_format: bool = False,
 ) -> MutableMapping[str, list[State | dict[str, Any]]]:
     """Return states changes during UTC period start_time - end_time.
-
+    
     entity_ids is an optional iterable of entities to include in the results.
 
     filters is an optional SQLAlchemy filter which will be applied to the database
@@ -344,19 +365,13 @@ def get_significant_states_with_session(
     as well as all states from certain domains (for instance
     thermostat so that we get current temperature in our graphs).
     """
-    if filters is not None:
-        raise NotImplementedError("Filters are no longer supported")
-    if not entity_ids:
-        raise ValueError("entity_ids must be provided")
-    stmt = _significant_states_stmt(
-        _schema_version(hass),
-        start_time,
-        end_time,
-        entity_ids,
-        significant_changes_only,
-        no_attributes,
+    validate_parameters(entity_ids, filters)
+    
+    states = fetch_states(
+        hass, session, start_time, end_time, 
+        entity_ids, significant_changes_only, no_attributes
     )
-    states = execute_stmt_lambda_element(session, stmt, None, end_time)
+    
     return _sorted_states_to_dict(
         hass,
         session,
@@ -367,7 +382,7 @@ def get_significant_states_with_session(
         minimal_response,
         no_attributes,
         compressed_state_format,
-    )
+    )
 
 
 def get_full_significant_states_with_session(
