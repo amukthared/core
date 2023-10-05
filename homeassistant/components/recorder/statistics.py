@@ -1210,6 +1210,39 @@ def _first_statistic(
     return None
 
 
+def get_oldest_sum_in_period(
+    session: Session, 
+    start_time: datetime | None, 
+    table: type[StatisticsBase], 
+    metadata_id: int
+) -> float | None:
+    """Return the oldest non-NULL sum during the period."""
+    stmt = lambda_stmt(
+        lambda: select(table.sum)
+        .filter(table.metadata_id == metadata_id)
+        .filter(table.sum.is_not(None))
+        .order_by(table.start_ts.asc())
+        .limit(1)
+    )
+    if start_time is not None:
+        adjusted_start_time = adjust_start_time(start_time, table)
+        prev_period_ts = (adjusted_start_time - table.duration).timestamp()
+        stmt += lambda q: q.filter(table.start_ts >= prev_period_ts)
+    stats = cast(Sequence[Row], execute_stmt_lambda_element(session, stmt))
+    return stats[0].sum if stats else None
+
+def adjust_start_time(start_time: datetime, table: type[StatisticsBase]) -> datetime:
+    """Adjust start time for different tables."""
+    if table == StatisticsShortTerm:
+        minutes = start_time.minute - start_time.minute % 5
+        return start_time.replace(minute=minutes, second=0, microsecond=0)
+    return start_time.replace(minute=0, second=0, microsecond=0)
+
+def validate_main_start_time(main_start_time: datetime, oldest_stat: datetime) -> bool:
+    """Validate main start time against the oldest stat."""
+    period = main_start_time.replace(minute=0, second=0, microsecond=0)
+    return period - Statistics.duration < oldest_stat
+
 def _get_oldest_sum_statistic(
     session: Session,
     head_start_time: datetime | None,
@@ -1220,75 +1253,26 @@ def _get_oldest_sum_statistic(
     metadata_id: int,
 ) -> float | None:
     """Return the oldest non-NULL sum during the period."""
-
-    def _get_oldest_sum_statistic_in_sub_period(
-        session: Session,
-        start_time: datetime | None,
-        table: type[StatisticsBase],
-        metadata_id: int,
-    ) -> float | None:
-        """Return the oldest non-NULL sum during the period."""
-        stmt = lambda_stmt(
-            lambda: select(table.sum)
-            .filter(table.metadata_id == metadata_id)
-            .filter(table.sum.is_not(None))
-            .order_by(table.start_ts.asc())
-            .limit(1)
-        )
-        if start_time is not None:
-            start_time = start_time + table.duration - timedelta.resolution
-            if table == StatisticsShortTerm:
-                minutes = start_time.minute - start_time.minute % 5
-                period = start_time.replace(minute=minutes, second=0, microsecond=0)
-            else:
-                period = start_time.replace(minute=0, second=0, microsecond=0)
-            prev_period = period - table.duration
-            prev_period_ts = prev_period.timestamp()
-            stmt += lambda q: q.filter(table.start_ts >= prev_period_ts)
-        stats = cast(Sequence[Row], execute_stmt_lambda_element(session, stmt))
-        return stats[0].sum if stats else None
-
-    oldest_sum: float | None = None
-
-    # This function won't be called if tail_only is False and main_start_time is None
-    # the extra checks are added to satisfy MyPy
+    
     if not tail_only and main_start_time is not None and oldest_stat is not None:
-        period = main_start_time.replace(minute=0, second=0, microsecond=0)
-        prev_period = period - Statistics.duration
-        if prev_period < oldest_stat:
+        if validate_main_start_time(main_start_time, oldest_stat):
             return 0
 
-    if (
-        head_start_time is not None
-        and (
-            oldest_sum := _get_oldest_sum_statistic_in_sub_period(
-                session, head_start_time, StatisticsShortTerm, metadata_id
-            )
-        )
-        is not None
-    ):
-        return oldest_sum
+    oldest_sum_head = get_oldest_sum_in_period(session, head_start_time, StatisticsShortTerm, metadata_id)
+    if head_start_time is not None and oldest_sum_head is not None:
+        return oldest_sum_head
 
     if not tail_only:
-        if (
-            oldest_sum := _get_oldest_sum_statistic_in_sub_period(
-                session, main_start_time, Statistics, metadata_id
-            )
-        ) is not None:
-            return oldest_sum
+        oldest_sum_main = get_oldest_sum_in_period(session, main_start_time, Statistics, metadata_id)
+        if oldest_sum_main is not None:
+            return oldest_sum_main
         return 0
+    
+    oldest_sum_tail = get_oldest_sum_in_period(session, tail_start_time, StatisticsShortTerm, metadata_id)
+    if tail_start_time is not None and oldest_sum_tail is not None:
+        return oldest_sum_tail
 
-    if (
-        tail_start_time is not None
-        and (
-            oldest_sum := _get_oldest_sum_statistic_in_sub_period(
-                session, tail_start_time, StatisticsShortTerm, metadata_id
-            )
-        )
-    ) is not None:
-        return oldest_sum
-
-    return 0
+    return 0
 
 
 def _get_newest_sum_statistic(
