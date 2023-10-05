@@ -226,6 +226,66 @@ def get_significant_states(
         )
 
 
+def _filter_last_changed_updated(schema_version: int, significant_changes_only: bool) -> StatementLambdaElement:
+    """Generate last changed and updated filtering based on schema_version."""
+    if not significant_changes_only:
+        return lambda q: q
+    
+    if schema_version >= 31:
+        return lambda q: q.filter(
+            (States.last_changed_ts == States.last_updated_ts)
+            | States.last_changed_ts.is_(None)
+        )
+    else:
+        return lambda q: q.filter(
+            (States.last_changed == States.last_updated)
+            | States.last_changed.is_(None)
+        )
+
+def _filter_significant_changes(schema_version: int, significant_changes_only: bool) -> StatementLambdaElement:
+    """Generate significant changes filtering based on schema_version."""
+    if not significant_changes_only:
+        return lambda q: q
+    
+    condition = [
+        States.entity_id.like(entity_domain)
+        for entity_domain in SIGNIFICANT_DOMAINS_ENTITY_ID_LIKE
+    ]
+    
+    if schema_version >= 31:
+        condition.append(
+            (States.last_changed_ts == States.last_updated_ts)
+            | States.last_changed_ts.is_(None)
+        )
+    else:
+        condition.append(
+            (States.last_changed == States.last_updated)
+            | States.last_changed.is_(None)
+        )
+    
+    return lambda q: q.filter(or_(*condition))
+
+def _filter_time_range(schema_version: int, start_time: datetime, end_time: datetime | None) -> StatementLambdaElement:
+    """Generate time range filtering based on schema_version."""
+    if schema_version >= 31:
+        start_time_ts = start_time.timestamp()
+        stmt = lambda q: q.filter(States.last_updated_ts > start_time_ts)
+        if end_time:
+            end_time_ts = end_time.timestamp()
+            stmt += lambda q: q.filter(States.last_updated_ts < end_time_ts)
+    else:
+        stmt = lambda q: q.filter(States.last_updated > start_time)
+        if end_time:
+            stmt += lambda q: q.filter(States.last_updated < end_time)
+    return stmt
+
+def _order_by(schema_version: int) -> StatementLambdaElement:
+    """Generate order by clause based on schema_version."""
+    if schema_version >= 31:
+        return lambda q: q.order_by(States.entity_id, States.last_updated_ts)
+    else:
+        return lambda q: q.order_by(States.entity_id, States.last_updated)
+
 def _significant_states_stmt(
     schema_version: int,
     start_time: datetime,
@@ -238,71 +298,27 @@ def _significant_states_stmt(
     stmt, join_attributes = _lambda_stmt_and_join_attributes(
         schema_version, no_attributes, include_last_changed=not significant_changes_only
     )
+    
     if (
         len(entity_ids) == 1
         and significant_changes_only
         and split_entity_id(entity_ids[0])[0] not in SIGNIFICANT_DOMAINS
     ):
-        if schema_version >= 31:
-            stmt += lambda q: q.filter(
-                (States.last_changed_ts == States.last_updated_ts)
-                | States.last_changed_ts.is_(None)
-            )
-        else:
-            stmt += lambda q: q.filter(
-                (States.last_changed == States.last_updated)
-                | States.last_changed.is_(None)
-            )
-    elif significant_changes_only:
-        if schema_version >= 31:
-            stmt += lambda q: q.filter(
-                or_(
-                    *[
-                        States.entity_id.like(entity_domain)
-                        for entity_domain in SIGNIFICANT_DOMAINS_ENTITY_ID_LIKE
-                    ],
-                    (
-                        (States.last_changed_ts == States.last_updated_ts)
-                        | States.last_changed_ts.is_(None)
-                    ),
-                )
-            )
-        else:
-            stmt += lambda q: q.filter(
-                or_(
-                    *[
-                        States.entity_id.like(entity_domain)
-                        for entity_domain in SIGNIFICANT_DOMAINS_ENTITY_ID_LIKE
-                    ],
-                    (
-                        (States.last_changed == States.last_updated)
-                        | States.last_changed.is_(None)
-                    ),
-                )
-            )
-    stmt += lambda q: q.filter(States.entity_id.in_(entity_ids))
-
-    if schema_version >= 31:
-        start_time_ts = start_time.timestamp()
-        stmt += lambda q: q.filter(States.last_updated_ts > start_time_ts)
-        if end_time:
-            end_time_ts = end_time.timestamp()
-            stmt += lambda q: q.filter(States.last_updated_ts < end_time_ts)
+        stmt += _filter_last_changed_updated(schema_version, significant_changes_only)
     else:
-        stmt += lambda q: q.filter(States.last_updated > start_time)
-        if end_time:
-            stmt += lambda q: q.filter(States.last_updated < end_time)
-
+        stmt += _filter_significant_changes(schema_version, significant_changes_only)
+    
+    stmt += lambda q: q.filter(States.entity_id.in_(entity_ids))
+    stmt += _filter_time_range(schema_version, start_time, end_time)
+    
     if join_attributes:
         stmt += lambda q: q.outerjoin(
             StateAttributes, States.attributes_id == StateAttributes.attributes_id
         )
-    if schema_version >= 31:
-        stmt += lambda q: q.order_by(States.entity_id, States.last_updated_ts)
-    else:
-        stmt += lambda q: q.order_by(States.entity_id, States.last_updated)
-    return stmt
-
+    
+    stmt += _order_by(schema_version)
+    
+    return stmt
 
 def get_significant_states_with_session(
     hass: HomeAssistant,
