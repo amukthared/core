@@ -468,28 +468,32 @@ class Thermostat(HomeAccessory):
         )
 
     @callback
-    def async_update_state(self, new_state):
-        """Update thermostat state after state changed."""
-        # We always recheck valid hvac modes as the entity
-        # may not have been fully setup when we saw it last
-        original_hc_hass_to_homekit = self.hc_hass_to_homekit
-        self._configure_hvac_modes(new_state)
+def _configure_hvac_modes(self, new_state):
+    """Configure HVAC modes."""
+    original_hc_hass_to_homekit = self.hc_hass_to_homekit
+    self._configure_hvac_modes(new_state)
+    return original_hc_hass_to_homekit
 
-        if self.hc_hass_to_homekit != original_hc_hass_to_homekit:
-            if self.char_target_heat_cool.value not in self.hc_homekit_to_hass:
-                # We must make sure the char value is
-                # in the new valid values before
-                # setting the new valid values or
-                # changing them with throw
-                self.char_target_heat_cool.set_value(
-                    list(self.hc_homekit_to_hass)[0], should_notify=False
-                )
-            self.char_target_heat_cool.override_properties(
-                valid_values=self.hc_hass_to_homekit
+def _update_target_heat_cool_if_needed(self, original_hc_hass_to_homekit):
+    """Update target heat-cool characteristics if there are changes."""
+    if self.hc_hass_to_homekit != original_hc_hass_to_homekit:
+        if self.char_target_heat_cool.value not in self.hc_homekit_to_hass:
+            # We must make sure the char value is
+            # in the new valid values before
+            # setting the new valid values or
+            # changing them with throw
+            self.char_target_heat_cool.set_value(
+                list(self.hc_homekit_to_hass)[0], should_notify=False
             )
+        self.char_target_heat_cool.override_properties(
+            valid_values=self.hc_hass_to_homekit
+        )
 
-        self._async_update_state(new_state)
-
+async def async_update_state(self, new_state):
+    """Update thermostat state after state changed."""
+    original_hc_hass_to_homekit = self._configure_hvac_modes(new_state)
+    self._update_target_heat_cool_if_needed(original_hc_hass_to_homekit)
+    self._async_update_state(new_state)
     @callback
     def _async_update_state(self, new_state):
         """Update state without rechecking the device features."""
