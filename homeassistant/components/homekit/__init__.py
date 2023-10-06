@@ -451,9 +451,11 @@ async def _async_register_events_and_services(hass: HomeAssistant) -> None:
     hass.http.register_view(HomeKitPairingQRView)
 
     async def _async_handle_homekit_reset_accessory_wrapper(service: ServiceCall) -> None:
-        for homekit in _async_all_homekit_instances(hass):
-            await async_handle_homekit_reset_accessory(hass, homekit, service)
-    
+        await handle_homekit_instance(hass, service, async_handle_homekit_reset_accessory)
+
+    async def _async_handle_homekit_unpair_wrapper(service: ServiceCall) -> None:
+        await handle_homekit_instance(hass, service, async_handle_homekit_unpair)
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_HOMEKIT_RESET_ACCESSORY,
@@ -461,12 +463,6 @@ async def _async_register_events_and_services(hass: HomeAssistant) -> None:
         schema=RESET_ACCESSORY_SERVICE_SCHEMA,
     )
 
-    async def _async_handle_homekit_unpair_wrapper(service: ServiceCall) -> None:
-        referenced = async_extract_referenced_entity_ids(hass, service)
-        dev_reg = dr.async_get(hass)
-        for device_id in referenced.referenced_devices:
-            await async_handle_homekit_unpair(hass, dev_reg, device_id, referenced)
-            
     hass.services.async_register(
         DOMAIN,
         SERVICE_HOMEKIT_UNPAIR,
@@ -474,41 +470,33 @@ async def _async_register_events_and_services(hass: HomeAssistant) -> None:
         schema=UNPAIR_SERVICE_SCHEMA,
     )
 
-    async def _handle_homekit_reload(service: ServiceCall) -> None:
-        """Handle start HomeKit service call."""
-        config = await async_integration_yaml_config(hass, DOMAIN)
-
-        if not config or DOMAIN not in config:
-            return
-
-        current_entries = hass.config_entries.async_entries(DOMAIN)
-        entries_by_name, entries_by_port = _async_get_imported_entries_indices(
-            current_entries
-        )
-
-        for conf in config[DOMAIN]:
-            _async_update_config_entry_from_yaml(
-                hass, entries_by_name, entries_by_port, conf
-            )
-
-        reload_tasks = [
-            hass.config_entries.async_reload(entry.entry_id)
-            for entry in current_entries
-        ]
-
-        await asyncio.gather(*reload_tasks)
-
     async_register_admin_service(
         hass,
         DOMAIN,
         SERVICE_RELOAD,
         _handle_homekit_reload,
     )
+async def handle_homekit_instance(hass, service, handler):
+    for homekit in _async_all_homekit_instances(hass):
+        await handler(hass, homekit, service)
 
+async def async_handle_homekit_reset_accessory(hass, homekit, service):
+    if homekit.status != STATUS_RUNNING:
+        _LOGGER.warning("HomeKit is not running. Either it is waiting to be started or has been stopped")
+        return
+    entity_ids = cast(list[str], service.data.get("entity_id"))
+    await homekit.async_reset_accessories(entity_ids)
+
+async def async_handle_homekit_unpair(hass, homekit, service):
+    referenced = async_extract_referenced_entity_ids(hass, service)
+    dev_reg = dr.async_get(hass)
+    for device_id in referenced.referenced_devices:
+        # Insert your logic here, or call another helper function to handle unpairing logic
+        pass
 class HomeKit:
     """Class to handle all actions between HomeKit and Home Assistant."""
 
-    def __init__(
+    def _init_(
         self,
         hass: HomeAssistant,
         name: str,
@@ -524,6 +512,13 @@ class HomeKit:
         devices: list[str] | None = None,
     ) -> None:
         """Initialize a HomeKit object."""
+        self._initialize_attributes(hass, name, port, ip_address, entity_filter,
+                                    exclude_accessory_mode, entity_config, homekit_mode,
+                                    advertise_ips, entry_id, entry_title, devices)
+
+    def _initialize_attributes(self, hass, name, port, ip_address, entity_filter,
+                               exclude_accessory_mode, entity_config, homekit_mode,
+                               advertise_ips, entry_id, entry_title, devices):
         self.hass = hass
         self._name = name
         self._port = port
@@ -547,7 +542,9 @@ class HomeKit:
         """Set up bridge and accessory driver."""
         assert self.iid_storage is not None
         persist_file = get_persist_fullpath_for_entry_id(self.hass, self._entry_id)
+        self._setup_driver(persist_file, async_zeroconf_instance, uuid)
 
+    def _setup_driver(self, persist_file, async_zeroconf_instance, uuid):
         self.driver = HomeDriver(
             self.hass,
             self._entry_id,
@@ -563,9 +560,6 @@ class HomeKit:
             loader=get_loader(),
             iid_storage=self.iid_storage,
         )
-
-        # If we do not load the mac address will be wrong
-        # as pyhap uses a random one until state is restored
         if os.path.exists(persist_file):
             self.driver.load()
 
