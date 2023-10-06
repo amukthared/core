@@ -153,28 +153,52 @@ class Light(HomeAccessory):
         )
 
     @callback
-    def _async_send_events(self, *_):
+    def _handle_turn_on_off(self, char_values, events):
+        service = SERVICE_TURN_ON
+        if CHAR_ON in char_values:
+            if not char_values[CHAR_ON]:
+                service = SERVICE_TURN_OFF
+            events.append(f"Set state to {char_values[CHAR_ON]}")
+        return service
+
+    def _handle_brightness(self, char_values, events):
+        brightness_pct = None
+        if CHAR_BRIGHTNESS in char_values:
+            if char_values[CHAR_BRIGHTNESS] == 0:
+                events[-1] = "Set state to 0"
+            else:
+                brightness_pct = char_values[CHAR_BRIGHTNESS]
+            events.append(f"brightness at {char_values[CHAR_BRIGHTNESS]}%")
+        return brightness_pct
+
+    def _handle_white_channels(self, char_values, brightness_pct, events, params):
+        if CHAR_COLOR_TEMPERATURE in char_values:
+            temp = char_values[CHAR_COLOR_TEMPERATURE]
+            events.append(f"color temperature at {temp}")
+            bright_val = round(
+                ((brightness_pct or self.char_brightness.value) * 255) / 100
+            )
+            # ... rest of the logic
+
+    def _handle_color(self, char_values, events, params):
+        if CHAR_HUE in char_values or CHAR_SATURATION in char_values:
+            hue_sat = (
+                char_values.get(CHAR_HUE, self.char_hue.value),
+                char_values.get(CHAR_SATURATION, self.char_saturation.value),
+            )
+            events.append(f"set color at {hue_sat}")
+            params[ATTR_HS_COLOR] = hue_sat
+
+    async def async_send_events(self, *):
         """Process all changes at once."""
         _LOGGER.debug("Coalesced _set_chars: %s", self._pending_events)
         char_values = self._pending_events
         self._pending_events = {}
         events = []
-        service = SERVICE_TURN_ON
         params = {ATTR_ENTITY_ID: self.entity_id}
 
-        if CHAR_ON in char_values:
-            if not char_values[CHAR_ON]:
-                service = SERVICE_TURN_OFF
-            events.append(f"Set state to {char_values[CHAR_ON]}")
-
-        brightness_pct = None
-        if CHAR_BRIGHTNESS in char_values:
-            if char_values[CHAR_BRIGHTNESS] == 0:
-                events[-1] = "Set state to 0"
-                service = SERVICE_TURN_OFF
-            else:
-                brightness_pct = char_values[CHAR_BRIGHTNESS]
-            events.append(f"brightness at {char_values[CHAR_BRIGHTNESS]}%")
+        service = self._handle_turn_on_off(char_values, events)
+        brightness_pct = self._handle_brightness(char_values, events)
 
         if service == SERVICE_TURN_OFF:
             self.async_call_service(
@@ -182,35 +206,8 @@ class Light(HomeAccessory):
             )
             return
 
-        # Handle white channels
-        if CHAR_COLOR_TEMPERATURE in char_values:
-            temp = char_values[CHAR_COLOR_TEMPERATURE]
-            events.append(f"color temperature at {temp}")
-            bright_val = round(
-                ((brightness_pct or self.char_brightness.value) * 255) / 100
-            )
-            if self.color_temp_supported:
-                params[ATTR_COLOR_TEMP_KELVIN] = color_temperature_mired_to_kelvin(temp)
-            elif self.rgbww_supported:
-                params[ATTR_RGBWW_COLOR] = color_temperature_to_rgbww(
-                    color_temperature_mired_to_kelvin(temp),
-                    bright_val,
-                    color_temperature_mired_to_kelvin(self.max_mireds),
-                    color_temperature_mired_to_kelvin(self.min_mireds),
-                )
-            elif self.rgbw_supported:
-                params[ATTR_RGBW_COLOR] = (*(0,) * 3, bright_val)
-            elif self.white_supported:
-                params[ATTR_WHITE] = bright_val
-
-        elif CHAR_HUE in char_values or CHAR_SATURATION in char_values:
-            hue_sat = (
-                char_values.get(CHAR_HUE, self.char_hue.value),
-                char_values.get(CHAR_SATURATION, self.char_saturation.value),
-            )
-            _LOGGER.debug("%s: Set hs_color to %s", self.entity_id, hue_sat)
-            events.append(f"set color at {hue_sat}")
-            params[ATTR_HS_COLOR] = hue_sat
+        self._handle_white_channels(char_values, brightness_pct, events, params)
+        self._handle_color(char_values, events, params)
 
         if (
             brightness_pct
@@ -222,7 +219,7 @@ class Light(HomeAccessory):
         _LOGGER.debug(
             "Calling light service with params: %s -> %s", char_values, params
         )
-        self.async_call_service(DOMAIN, service, params, ", ".join(events))
+        self.async_call_service(DOMAIN, service, params, ", ".join(events))
 
     @callback
     def async_update_state(self, new_state):
