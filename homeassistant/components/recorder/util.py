@@ -477,18 +477,18 @@ def handle_sqlite_connection(dbapi_connection, first_connection, instance, versi
     # SQLite-specific connection setup logic
     # ...
 
-def handle_mysql_connection(dbapi_connection, first_connection, instance, version):
+    def handle_mysql_connection(dbapi_connection, first_connection, instance, version):
     # MySQL-specific connection setup logic
     # ...
 
-def handle_postgresql_connection(dbapi_connection, first_connection, version):
+        def handle_postgresql_connection(dbapi_connection, first_connection, version):
     # PostgreSQL-specific connection setup logic
     # ...
 
-def check_version(version, version_string, db_name, min_version):
+            def check_version(version, version_string, db_name, min_version):
     # Version checking logic
-    if not version or version < min_version:
-        _fail_unsupported_version(
+                if not version or version < min_version:
+                    _fail_unsupported_version(
             version or version_string, db_name, min_version
         )
 
@@ -523,8 +523,8 @@ def setup_connection_for_dialect(
     return DatabaseEngine(
         dialect=SupportedDialect(dialect_name),
         version=version,
-        optimizer=DatabaseOptimizer(slow_range_in_select=slow_range_in_select),
-    )
+        optimizer=DatabaseOptimizer(slow_range_in_select=slow_range_in_select)
+        )
 
 
 def end_incomplete_runs(session: Session, start_time: datetime) -> None:
