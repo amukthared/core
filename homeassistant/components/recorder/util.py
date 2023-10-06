@@ -141,6 +141,41 @@ def session_scope(
         session.close()
 
 
+def log_debug(debug, to_native, result, timer_start):
+    elapsed = time.perf_counter() - timer_start
+    if to_native:
+        _LOGGER.debug(
+            "converting %d rows to native objects took %fs",
+            len(result),
+            elapsed,
+        )
+    else:
+        _LOGGER.debug(
+            "querying %d rows took %fs",
+            len(result),
+            elapsed,
+        )
+
+def handle_query_error(err, tryno):
+    _LOGGER.error("Error executing query: %s", err)
+
+    if tryno == RETRIES - 1:
+        raise
+    time.sleep(QUERY_RETRY_WAIT)
+
+def execute_query(qry, to_native, validate_entity_ids):
+    if to_native:
+        return [
+            row
+            for row in (
+                row.to_native(validate_entity_id=validate_entity_ids)
+                for row in qry
+            )
+            if row is not None
+        ]
+    else:
+        return qry.all()
+
 def execute(
     qry: Query, to_native: bool = False, validate_entity_ids: bool = True
 ) -> list[Row]:
@@ -149,48 +184,25 @@ def execute(
     This method also retries a few times in the case of stale connections.
     """
     debug = _LOGGER.isEnabledFor(logging.DEBUG)
-    for tryno in range(0, RETRIES):
+
+    for tryno in range(RETRIES):
         try:
+            timer_start = None
             if debug:
                 timer_start = time.perf_counter()
 
-            if to_native:
-                result = [
-                    row
-                    for row in (
-                        row.to_native(validate_entity_id=validate_entity_ids)
-                        for row in qry
-                    )
-                    if row is not None
-                ]
-            else:
-                result = qry.all()
+            result = execute_query(qry, to_native, validate_entity_ids)
 
             if debug:
-                elapsed = time.perf_counter() - timer_start
-                if to_native:
-                    _LOGGER.debug(
-                        "converting %d rows to native objects took %fs",
-                        len(result),
-                        elapsed,
-                    )
-                else:
-                    _LOGGER.debug(
-                        "querying %d rows took %fs",
-                        len(result),
-                        elapsed,
-                    )
+                log_debug(debug, to_native, result, timer_start)
 
             return result
-        except SQLAlchemyError as err:
-            _LOGGER.error("Error executing query: %s", err)
 
-            if tryno == RETRIES - 1:
-                raise
-            time.sleep(QUERY_RETRY_WAIT)
+        except SQLAlchemyError as err:
+            handle_query_error(err, tryno)
 
     # Unreachable
-    raise RuntimeError  # pragma: no cover
+    raise RuntimeError  # pragma: no cover
 
 
 def execute_stmt_lambda_element(
