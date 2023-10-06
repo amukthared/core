@@ -400,55 +400,71 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             ),
         )
 
-    async def async_step_cameras(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Choose camera config."""
-        if user_input is not None:
-            entity_config = self.hk_options[CONF_ENTITY_CONFIG]
-            for entity_id in self.included_cameras:
-                if entity_id in user_input[CONF_CAMERA_COPY]:
-                    entity_config.setdefault(entity_id, {})[
-                        CONF_VIDEO_CODEC
-                    ] = VIDEO_CODEC_COPY
-                elif (
-                    entity_id in entity_config
-                    and CONF_VIDEO_CODEC in entity_config[entity_id]
-                ):
-                    del entity_config[entity_id][CONF_VIDEO_CODEC]
-                if entity_id in user_input[CONF_CAMERA_AUDIO]:
-                    entity_config.setdefault(entity_id, {})[CONF_SUPPORT_AUDIO] = True
-                elif (
-                    entity_id in entity_config
-                    and CONF_SUPPORT_AUDIO in entity_config[entity_id]
-                ):
-                    del entity_config[entity_id][CONF_SUPPORT_AUDIO]
-            return await self.async_step_advanced()
+   async def handle_user_input(self, user_input: dict[str, Any]) -> None:
+    """Handle user input related logic."""
+    entity_config = self.hk_options[CONF_ENTITY_CONFIG]
+    for entity_id in self.included_cameras:
+        handle_camera_copy(entity_config, entity_id, user_input)
+        handle_camera_audio(entity_config, entity_id, user_input)
 
-        cameras_with_audio = []
-        cameras_with_copy = []
-        entity_config = self.hk_options.setdefault(CONF_ENTITY_CONFIG, {})
-        for entity in self.included_cameras:
-            hk_entity_config = entity_config.get(entity, {})
-            if hk_entity_config.get(CONF_VIDEO_CODEC) == VIDEO_CODEC_COPY:
-                cameras_with_copy.append(entity)
-            if hk_entity_config.get(CONF_SUPPORT_AUDIO):
-                cameras_with_audio.append(entity)
 
-        data_schema = vol.Schema(
-            {
-                vol.Optional(
-                    CONF_CAMERA_COPY,
-                    default=cameras_with_copy,
-                ): cv.multi_select(self.included_cameras),
-                vol.Optional(
-                    CONF_CAMERA_AUDIO,
-                    default=cameras_with_audio,
-                ): cv.multi_select(self.included_cameras),
-            }
-        )
-        return self.async_show_form(step_id="cameras", data_schema=data_schema)
+def handle_camera_copy(entity_config: dict[str, Any], entity_id: str, user_input: dict[str, Any]) -> None:
+    """Handle camera copy configuration."""
+    if entity_id in user_input[CONF_CAMERA_COPY]:
+        entity_config.setdefault(entity_id, {})[CONF_VIDEO_CODEC] = VIDEO_CODEC_COPY
+    elif (
+        entity_id in entity_config
+        and CONF_VIDEO_CODEC in entity_config[entity_id]
+    ):
+        del entity_config[entity_id][CONF_VIDEO_CODEC]
 
+
+def handle_camera_audio(entity_config: dict[str, Any], entity_id: str, user_input: dict[str, Any]) -> None:
+    """Handle camera audio configuration."""
+    if entity_id in user_input[CONF_CAMERA_AUDIO]:
+        entity_config.setdefault(entity_id, {})[CONF_SUPPORT_AUDIO] = True
+    elif (
+        entity_id in entity_config
+        and CONF_SUPPORT_AUDIO in entity_config[entity_id]
+    ):
+        del entity_config[entity_id][CONF_SUPPORT_AUDIO]
+
+
+async def get_cameras_data(self) -> Tuple[List[str], List[str]]:
+    """Get cameras data for form schema."""
+    cameras_with_audio = []
+    cameras_with_copy = []
+    entity_config = self.hk_options.setdefault(CONF_ENTITY_CONFIG, {})
+    for entity in self.included_cameras:
+        hk_entity_config = entity_config.get(entity, {})
+        if hk_entity_config.get(CONF_VIDEO_CODEC) == VIDEO_CODEC_COPY:
+            cameras_with_copy.append(entity)
+        if hk_entity_config.get(CONF_SUPPORT_AUDIO):
+            cameras_with_audio.append(entity)
+    return cameras_with_copy, cameras_with_audio
+
+
+async def async_step_cameras(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    """Choose camera config."""
+    if user_input is not None:
+        await handle_user_input(self, user_input)
+        return await self.async_step_advanced()
+
+    cameras_with_copy, cameras_with_audio = await get_cameras_data(self)
+
+    data_schema = vol.Schema(
+        {
+            vol.Optional(
+                CONF_CAMERA_COPY,
+                default=cameras_with_copy,
+            ): cv.multi_select(self.included_cameras),
+            vol.Optional(
+                CONF_CAMERA_AUDIO,
+                default=cameras_with_audio,
+            ): cv.multi_select(self.included_cameras),
+        }
+    )
+    return self.async_show_form(step_id="cameras", data_schema=data_schema
     async def async_step_accessory(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
